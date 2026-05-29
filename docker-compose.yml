@@ -1,0 +1,31 @@
+services:
+  officekit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${HOST_PORT:-3000}:${PORT:-3000}"
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-3000}
+      MAX_FILES: ${MAX_FILES:-10}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-26214400}
+      UPLOAD_DIR: ${UPLOAD_DIR:-/tmp/officekit/uploads}
+      GHOSTSCRIPT_PATH: ${GHOSTSCRIPT_PATH-}
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOME: /tmp
+      NPM_CONFIG_CACHE: /tmp/.npm
+      npm_config_update_notifier: "false"
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: node
+    init: true
+    pids_limit: "${PIDS_LIMIT:-256}"
+    mem_limit: "${MEM_LIMIT:-512m}"
+    cpus: "${CPUS:-1.0}"
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+{
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/api/qrcode/generate/route": "app/api/qrcode/generate/route.js",
+  "/page": "app/page.js",
+  "/tools/pdf/split/page": "app/tools/pdf/split/page.js",
+  "/tools/pdf/merge/page": "app/tools/pdf/merge/page.js",
+  "/tools/qrcode/page": "app/tools/qrcode/page.js"
+}

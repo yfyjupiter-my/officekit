@@ -1,0 +1,10 @@
+.next
+.next-officekit/cache
+node_modules
+npm-debug.log
+pnpm-debug.log
+.env
+.env.*
+.git
+.gitignore
+README.md

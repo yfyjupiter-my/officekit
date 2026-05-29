@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f5f2;
+  --foreground: #2c2c2c;
+  --muji-bg: #f7f5f2;
+  --muji-bg-card: #fdfcfa;
+  --muji-bg-hover: #f0ede8;
+  --muji-border: #e8e4de;
+  --muji-border-strong: #d4cfc8;
+  --muji-text-primary: #2c2c2c;
+  --muji-text-secondary: #6b6560;
+  --muji-text-muted: #9e9890;
+  --muji-text-inverse: #fdfcfa;
+  --muji-accent: #8b7355;
+  --muji-accent-hover: #7a6448;
+  --muji-success: #6b8f71;
+  --muji-warning: #b8956a;
+  --muji-error: #a05c5c;
+  --muji-info: #6b82a0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muji-bg: var(--muji-bg);
+  --color-muji-bg-card: var(--muji-bg-card);
+  --color-muji-bg-hover: var(--muji-bg-hover);
+  --color-muji-border: var(--muji-border);
+  --color-muji-border-strong: var(--muji-border-strong);
+  --color-muji-text-primary: var(--muji-text-primary);
+  --color-muji-text-secondary: var(--muji-text-secondary);
+  --color-muji-text-muted: var(--muji-text-muted);
+  --color-muji-text-inverse: var(--muji-text-inverse);
+  --color-muji-accent: var(--muji-accent);
+  --color-muji-accent-hover: var(--muji-accent-hover);
+  --color-muji-success: var(--muji-success);
+  --color-muji-warning: var(--muji-warning);
+  --color-muji-error: var(--muji-error);
+  --color-muji-info: var(--muji-info);
+  --font-body: var(--font-body-font);
+  --font-title: var(--font-title-font);
+  --font-sans: var(--font-body-font);
+  --font-mono: var(--font-mono-font);
+}
+
+.shadow-muji-sm {
+  box-shadow: 0 1px 3px rgba(44, 44, 44, 0.06);
+}
+
+.shadow-muji-md {
+  box-shadow: 0 4px 12px rgba(44, 44, 44, 0.08);
+}
+
+.shadow-muji-lg {
+  box-shadow: 0 8px 32px rgba(44, 44, 44, 0.1);
+}
+
+.bg-muji-overlay {
+  background: rgba(44, 44, 44, 0.3);
+}
+
+@keyframes muji-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes muji-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes muji-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-muji-fade {
+  animation: muji-fade-in 200ms ease-out both;
+}
+
+.animate-muji-scale {
+  animation: muji-scale-in 250ms ease-out both;
+}
+
+.animate-muji-spin {
+  animation: muji-spin 600ms linear infinite;
+}
