@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server"
 
+import { checkRateLimit } from "@/lib/rate-limit"
+import { readJsonWithLimit } from "@/lib/upload"
+
 import { QrCodeError, generateQrPngBuffer } from "@/modules/qrcode"
 import type {
   QrErrorCorrectionLevel,
@@ -152,17 +155,17 @@ function parseOptions(input: unknown): QrGenerateOptions {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("application/json")) {
     return badRequest("INVALID_CONTENT_TYPE", "Expected application/json request body.")
   }
 
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return badRequest("INVALID_JSON", "Invalid JSON body.")
-  }
+  const parsed = await readJsonWithLimit(request)
+  if (parsed instanceof Response) return parsed
+  const body = parsed.value
 
   if (!isRecord(body)) {
     return badRequest("INVALID_BODY", "Request body must be a JSON object.")

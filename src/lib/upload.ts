@@ -10,7 +10,16 @@ import { getEnvInt, getEnvString } from "@/lib/env"
 export interface UploadLimits {
   maxFiles: number
   maxFileSizeBytes: number
+  /** Cap on the combined size of all files in one request. */
+  maxTotalSizeBytes?: number
 }
+
+const DEFAULT_MAX_FILES = 10
+const DEFAULT_MAX_FILE_SIZE = 25 * 1024 * 1024
+const DEFAULT_MAX_TOTAL_UPLOAD_SIZE = 100 * 1024 * 1024
+/** Allowance for multipart boundaries, part headers and small text fields. */
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+const DEFAULT_MAX_JSON_BODY_BYTES = 64 * 1024
 
 export interface UploadMeta {
   originalName: string
@@ -22,6 +31,7 @@ export class UploadError extends Error {
   readonly code:
     | "TOO_MANY_FILES"
     | "FILE_TOO_LARGE"
+    | "TOTAL_TOO_LARGE"
     | "EMPTY_FILE"
     | "WRITE_FAILED"
 
@@ -35,10 +45,132 @@ export class UploadError extends Error {
   }
 }
 
+function getPositiveEnvInt(name: string, fallback: number): number {
+  const value = getEnvInt(name, fallback)
+  return value > 0 ? value : fallback
+}
+
 export function getDefaultUploadLimits(): UploadLimits {
   return {
-    maxFiles: getEnvInt("MAX_FILES", 10),
-    maxFileSizeBytes: getEnvInt("MAX_FILE_SIZE", 25 * 1024 * 1024),
+    maxFiles: getPositiveEnvInt("MAX_FILES", DEFAULT_MAX_FILES),
+    maxFileSizeBytes: getPositiveEnvInt("MAX_FILE_SIZE", DEFAULT_MAX_FILE_SIZE),
+    maxTotalSizeBytes: getPositiveEnvInt(
+      "MAX_TOTAL_UPLOAD_SIZE",
+      DEFAULT_MAX_TOTAL_UPLOAD_SIZE,
+    ),
+  }
+}
+
+/**
+ * Largest request body (in bytes) a multipart upload route should accept
+ * for the given limits, including multipart framing overhead.
+ */
+export function getMaxMultipartBodyBytes(limits: UploadLimits): number {
+  const perFileTotal = limits.maxFiles * limits.maxFileSizeBytes
+  const total =
+    typeof limits.maxTotalSizeBytes === "number"
+      ? Math.min(perFileTotal, limits.maxTotalSizeBytes)
+      : perFileTotal
+  return total + MULTIPART_OVERHEAD_BYTES
+}
+
+function jsonError(status: number, code: string, message: string): Response {
+  return Response.json({ ok: false, error: { code, message } }, { status })
+}
+
+function requestTooLarge(maxBytes: number): Response {
+  return jsonError(
+    413,
+    "REQUEST_TOO_LARGE",
+    `Request body exceeds max size of ${maxBytes} bytes.`,
+  )
+}
+
+/**
+ * Reads the request body while enforcing a byte cap, so oversized uploads are
+ * rejected before they are buffered in memory. Rejects early on a declared
+ * Content-Length and also counts bytes for chunked / undeclared bodies; the
+ * returned stream errors (and `exceeded()` turns true) once the cap is crossed.
+ */
+function limitBody(
+  request: Request,
+  maxBytes: number,
+): { body: ReadableStream<Uint8Array>; exceeded: () => boolean } | "too-large" | "no-body" {
+  const declared = request.headers.get("content-length")
+  if (declared !== null) {
+    const declaredBytes = Number(declared)
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) return "too-large"
+  }
+
+  if (!request.body) return "no-body"
+
+  let received = 0
+  let exceeded = false
+  const body = request.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength
+        if (received > maxBytes) {
+          exceeded = true
+          controller.error(new Error("Request body too large."))
+          return
+        }
+        controller.enqueue(chunk)
+      },
+    }),
+  )
+  return { body, exceeded: () => exceeded }
+}
+
+/**
+ * Parses multipart/form-data with a body size cap.
+ * Returns the FormData, or a ready-to-send error Response
+ * (413 when too large, 400 when the body is missing or malformed).
+ */
+export async function readFormDataWithLimit(
+  request: Request,
+  maxBytes: number,
+): Promise<FormData | Response> {
+  const limited = limitBody(request, maxBytes)
+  if (limited === "too-large") return requestTooLarge(maxBytes)
+  if (limited === "no-body") {
+    return jsonError(400, "INVALID_FORM_DATA", "Expected a multipart/form-data body.")
+  }
+
+  try {
+    return await new Response(limited.body, {
+      headers: { "content-type": request.headers.get("content-type") ?? "" },
+    }).formData()
+  } catch {
+    if (limited.exceeded()) return requestTooLarge(maxBytes)
+    return jsonError(400, "INVALID_FORM_DATA", "Malformed multipart/form-data body.")
+  }
+}
+
+/**
+ * Parses a JSON body with a size cap. Returns `{ value }` on success,
+ * or a ready-to-send error Response (413 too large, 400 invalid JSON).
+ */
+export async function readJsonWithLimit(
+  request: Request,
+  maxBytes: number = DEFAULT_MAX_JSON_BODY_BYTES,
+): Promise<{ value: unknown } | Response> {
+  const limited = limitBody(request, maxBytes)
+  if (limited === "too-large") return requestTooLarge(maxBytes)
+  if (limited === "no-body") return jsonError(400, "INVALID_JSON", "Invalid JSON body.")
+
+  let text: string
+  try {
+    text = await new Response(limited.body).text()
+  } catch {
+    if (limited.exceeded()) return requestTooLarge(maxBytes)
+    return jsonError(400, "INVALID_JSON", "Invalid JSON body.")
+  }
+
+  try {
+    return { value: JSON.parse(text) as unknown }
+  } catch {
+    return jsonError(400, "INVALID_JSON", "Invalid JSON body.")
   }
 }
 
@@ -77,6 +209,7 @@ export function validateUploadSizes(
     )
   }
 
+  let totalSize = 0
   for (let index = 0; index < files.length; index += 1) {
     const size = files[index].size
     if (size <= 0) {
@@ -89,6 +222,17 @@ export function validateUploadSizes(
         index,
       )
     }
+    totalSize += size
+  }
+
+  if (
+    typeof limits.maxTotalSizeBytes === "number" &&
+    totalSize > limits.maxTotalSizeBytes
+  ) {
+    throw new UploadError(
+      "TOTAL_TOO_LARGE",
+      `Combined upload size exceeds max of ${limits.maxTotalSizeBytes} bytes.`,
+    )
   }
 }
 

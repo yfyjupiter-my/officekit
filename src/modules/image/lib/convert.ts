@@ -1,6 +1,8 @@
 import JSZip from "jszip"
 import sharp from "sharp"
 
+import { getEnvInt } from "@/lib/env"
+
 import { ImageConvertError } from "./errors"
 import type { ImageConvertInput, ImageConvertOptions, ImageOutputFormat } from "./types"
 
@@ -8,6 +10,21 @@ type NormalizedConvertOptions =
   | { outputFormat: "png"; pngCompressionLevel: number }
   | { outputFormat: "jpg"; quality: number }
   | { outputFormat: "webp"; quality: number }
+
+/** Decoded input formats accepted (sharp `metadata().format` values). */
+const ALLOWED_INPUT_FORMATS: ReadonlySet<string> = new Set(["png", "jpeg", "webp"])
+
+const DEFAULT_MAX_IMAGE_PIXELS = 40_000_000
+
+/**
+ * Max decoded pixels per input image. Bounds decode memory
+ * (40 MP RGBA ≈ 160 MB); sharp's own default (≈268 MP) can exceed
+ * the container memory limit.
+ */
+function getMaxImagePixels(): number {
+  const value = getEnvInt("MAX_IMAGE_PIXELS", DEFAULT_MAX_IMAGE_PIXELS)
+  return value > 0 ? value : DEFAULT_MAX_IMAGE_PIXELS
+}
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && typeof error.message === "string") return error.message
@@ -132,16 +149,42 @@ async function convertSingleImage(
   }
 
   const sourceBuffer = Buffer.from(input.data)
-  const pipeline = sharp(sourceBuffer, { failOnError: true })
+  const maxPixels = getMaxImagePixels()
+  const pipeline = sharp(sourceBuffer, {
+    failOn: "warning",
+    limitInputPixels: maxPixels,
+  })
 
+  let metadata: Awaited<ReturnType<typeof pipeline.metadata>>
   try {
-    await pipeline.metadata()
+    // Header-only read; no pixel limit so oversized images get a clear
+    // IMAGE_TOO_LARGE below. The decode pipeline keeps limitInputPixels.
+    metadata = await sharp(sourceBuffer, { limitInputPixels: false }).metadata()
   } catch (error) {
     throw new ImageConvertError("INVALID_IMAGE", "Input is not a valid image.", {
       field: "inputs[].data",
       inputIndex,
       details: getErrorMessage(error),
     })
+  }
+
+  // Only decode the formats the tool advertises. Anything else (SVG, HEIF,
+  // TIFF, GIF, PDF, ...) would reach additional native decoders.
+  if (!metadata.format || !ALLOWED_INPUT_FORMATS.has(metadata.format)) {
+    throw new ImageConvertError(
+      "UNSUPPORTED_FORMAT",
+      "Unsupported image format. Expected PNG, JPG or WebP.",
+      { field: "inputs[].data", inputIndex, details: metadata.format },
+    )
+  }
+
+  const pixels = (metadata.width ?? 0) * (metadata.height ?? 0)
+  if (pixels > maxPixels) {
+    throw new ImageConvertError(
+      "IMAGE_TOO_LARGE",
+      `Image exceeds max of ${maxPixels} pixels.`,
+      { field: "inputs[].data", inputIndex },
+    )
   }
 
   try {

@@ -1,6 +1,8 @@
 export type ImageConvertErrorCode =
   | "EMPTY_INPUT"
   | "INVALID_IMAGE"
+  | "UNSUPPORTED_FORMAT"
+  | "IMAGE_TOO_LARGE"
   | "INVALID_OPTION"
   | "CONVERT_FAILED"
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useState } from "react"
 
+import { downloadBlob, parseAttachmentFilename } from "@/lib/client-files"
 import { Checkbox, Radio } from "@/components/choice"
 import { ErrorState } from "@/components/error-state"
 import { Select } from "@/components/select"
@@ -21,22 +22,6 @@ type ApiErrorShape = {
 type Mode = "text" | "wifi"
 type WifiSecurity = "WPA" | "WEP" | "nopass"
 type EccLevel = "L" | "M" | "Q" | "H"
-
-function parseAttachmentFilename(contentDisposition: string | null): string | null {
-  if (!contentDisposition) return null
-  const match =
-    /filename\*=(?:UTF-8'')?([^;]+)|filename="([^"]+)"|filename=([^;]+)/i.exec(
-      contentDisposition,
-    )
-  const raw = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim()
-  if (!raw) return null
-  const unquoted = raw.replace(/^"(.*)"$/, "$1")
-  try {
-    return decodeURIComponent(unquoted)
-  } catch {
-    return unquoted
-  }
-}
 
 function readCssVar(name: string): string | null {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
@@ -158,17 +143,7 @@ export default function QrCodeToolPage() {
       const filename =
         parseAttachmentFilename(response.headers.get("content-disposition")) ?? "qrcode.png"
 
-      const url = URL.createObjectURL(blob)
-      try {
-        const anchor = document.createElement("a")
-        anchor.href = url
-        anchor.download = filename
-        document.body.appendChild(anchor)
-        anchor.click()
-        anchor.remove()
-      } finally {
-        URL.revokeObjectURL(url)
-      }
+      downloadBlob(blob, filename)
       push({ kind: "success", title: "Downloaded", description: filename })
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Generate failed.")

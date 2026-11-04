@@ -2,10 +2,14 @@ import fs from "node:fs/promises"
 
 import { NextResponse } from "next/server"
 
+import { acquireJobSlot, checkRateLimit } from "@/lib/rate-limit"
 import {
   cleanupRequestDir,
+  getDefaultUploadLimits,
   persistUploadsToTemp,
   UploadError,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { mergePdfBuffers, PdfMergeError } from "@/modules/pdf/lib"
 
@@ -34,6 +38,9 @@ function isUploadedFile(value: FormDataEntryValue): value is File {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return badRequest(
@@ -42,7 +49,12 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const formData = await request.formData()
+  const bodyLimits = getDefaultUploadLimits()
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const entries = [
     ...formData.getAll("files[]"),
     ...formData.getAll("files"),
@@ -74,6 +86,9 @@ export async function POST(request: Request): Promise<Response> {
       )
     }
   }
+
+  const releaseJobSlot = await acquireJobSlot()
+  if (releaseJobSlot instanceof Response) return releaseJobSlot
 
   let requestDir: string | undefined
 
@@ -112,6 +127,7 @@ export async function POST(request: Request): Promise<Response> {
     }
     return internalError()
   } finally {
+    releaseJobSlot()
     if (requestDir) {
       try {
         await cleanupRequestDir(requestDir)

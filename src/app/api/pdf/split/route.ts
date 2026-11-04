@@ -2,11 +2,14 @@ import fs from "node:fs/promises"
 
 import { NextResponse } from "next/server"
 
+import { acquireJobSlot, checkRateLimit } from "@/lib/rate-limit"
 import {
   cleanupRequestDir,
   getDefaultUploadLimits,
   persistUploadsToTemp,
   UploadError,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { PdfSplitError, splitPdfToZipBuffer } from "@/modules/pdf/lib"
 
@@ -35,6 +38,9 @@ function isUploadedFile(value: FormDataEntryValue): value is File {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return badRequest(
@@ -43,7 +49,12 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const formData = await request.formData()
+  const bodyLimits = { ...getDefaultUploadLimits(), maxFiles: 1 }
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const fileEntry = formData.get("file")
 
   if (!fileEntry) {
@@ -61,6 +72,9 @@ export async function POST(request: Request): Promise<Response> {
   if (!declaredPdf && !namedPdf) {
     return badRequest("INVALID_TYPE", "Only PDF files are supported.")
   }
+
+  const releaseJobSlot = await acquireJobSlot()
+  if (releaseJobSlot instanceof Response) return releaseJobSlot
 
   let requestDir: string | undefined
 
@@ -96,6 +110,7 @@ export async function POST(request: Request): Promise<Response> {
     }
     return internalError()
   } finally {
+    releaseJobSlot()
     if (requestDir) {
       try {
         await cleanupRequestDir(requestDir)

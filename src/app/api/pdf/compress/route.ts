@@ -2,12 +2,15 @@ import fs from "node:fs/promises"
 
 import { NextResponse } from "next/server"
 
+import { acquireJobSlot, checkRateLimit } from "@/lib/rate-limit"
 import {
   cleanupRequestDir,
   getDefaultUploadLimits,
   persistUploadsToTemp,
   UploadError,
   validateUploadSizes,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { getEnvString } from "@/lib/env"
 import { compressPdfBuffer, PdfCompressError } from "@/modules/pdf/lib"
@@ -52,6 +55,9 @@ function parsePreset(value: FormDataEntryValue | null): PdfCompressPreset | unde
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return badRequest(
@@ -60,7 +66,12 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const formData = await request.formData()
+  const bodyLimits = { ...getDefaultUploadLimits(), maxFiles: 1 }
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const fileEntries = formData.getAll("file")
   const presetValue = formData.get("preset")
 
@@ -93,6 +104,9 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
+  const releaseJobSlot = await acquireJobSlot()
+  if (releaseJobSlot instanceof Response) return releaseJobSlot
+
   let requestDir: string | undefined
 
   try {
@@ -113,14 +127,17 @@ export async function POST(request: Request): Promise<Response> {
     const ghostscriptPath =
       ghostscriptPathRaw.trim().length > 0 ? ghostscriptPathRaw.trim() : undefined
 
-    const compressed = await compressPdfBuffer(data, { preset, ghostscriptPath })
-    const compressedBytes = new Uint8Array(compressed)
+    const result = await compressPdfBuffer(data, { preset, ghostscriptPath })
+    const compressedBytes = new Uint8Array(result.data)
 
     return new NextResponse(compressedBytes, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": 'attachment; filename="compressed.pdf"',
+        "X-Compression-Applied": result.compressed ? "true" : "false",
+        "X-Original-Size": String(result.originalSize),
+        "X-Output-Size": String(result.data.length),
       },
     })
   } catch (error) {
@@ -130,10 +147,28 @@ export async function POST(request: Request): Promise<Response> {
       })
     }
     if (error instanceof PdfCompressError) {
+      if (error.code === "INVALID_PDF") {
+        return badRequest(error.code, error.message)
+      }
+      if (error.code === "GHOSTSCRIPT_FAILED") {
+        // Ghostscript rejected this input (corrupt or unsupported PDF).
+        return NextResponse.json(
+          { ok: false, error: { code: error.code, message: "Could not process this PDF. It may be corrupt or unsupported." } },
+          { status: 422 },
+        )
+      }
+      if (error.code === "GHOSTSCRIPT_TIMEOUT") {
+        // The input is too expensive to process, not a server fault.
+        return NextResponse.json(
+          { ok: false, error: { code: error.code, message: error.message } },
+          { status: 422 },
+        )
+      }
       return internalError(error.code, error.message)
     }
     return internalError()
   } finally {
+    releaseJobSlot()
     if (requestDir) {
       try {
         await cleanupRequestDir(requestDir)

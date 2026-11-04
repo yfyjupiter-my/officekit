@@ -1,5 +1,7 @@
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib"
 
+import { getMaxPdfPages } from "./limits"
+
 export type PdfEditOverlayPositionPreset =
   | "top-left"
   | "top-right"
@@ -24,6 +26,8 @@ export type PdfEditOverlayErrorCode =
   | "EMPTY_PDF"
   | "INVALID_OPTION"
   | "INVALID_PAGE_RANGE"
+  | "TOO_MANY_PAGES"
+  | "UNSUPPORTED_CHARACTERS"
   | "OVERLAY_FAILED"
 
 export type PdfEditOverlayErrorField =
@@ -188,29 +192,57 @@ function resolvePageIndices(
   return parsePageRangeToIndices(pages.range, pageCount)
 }
 
+const LINE_HEIGHT_FACTOR = 1.2
+const MAX_OVERLAY_CHARS = 1000
+const MAX_OVERLAY_LINES = 20
+
+/** Splits overlay text into lines, normalising CRLF/CR and expanding tabs. */
+function toOverlayLines(text: string): string[] {
+  return text
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.replace(/\t/g, "    ").trimEnd())
+}
+
+/**
+ * Bottom-left corner of the text block for a position preset,
+ * clamped so the block stays on the page.
+ */
 function resolveOverlayPosition(
   preset: PdfEditOverlayPositionPreset,
   pageWidth: number,
   pageHeight: number,
-  textWidth: number,
-  fontSize: number,
+  blockWidth: number,
+  blockHeight: number,
 ): { x: number; y: number } {
   const margin = 36
-  const maxX = Math.max(0, pageWidth - textWidth)
-  const maxY = Math.max(0, pageHeight - fontSize)
+  const maxX = Math.max(0, pageWidth - blockWidth)
+  const maxY = Math.max(0, pageHeight - blockHeight)
+  const top = clamp(pageHeight - margin - blockHeight, 0, maxY)
+  const bottom = clamp(margin, 0, maxY)
+  const left = clamp(margin, 0, maxX)
+  const right = clamp(pageWidth - margin - blockWidth, 0, maxX)
 
   switch (preset) {
     case "top-left":
-      return { x: clamp(margin, 0, maxX), y: clamp(pageHeight - margin - fontSize, 0, maxY) }
+      return { x: left, y: top }
     case "top-right":
-      return { x: clamp(pageWidth - margin - textWidth, 0, maxX), y: clamp(pageHeight - margin - fontSize, 0, maxY) }
+      return { x: right, y: top }
     case "bottom-left":
-      return { x: clamp(margin, 0, maxX), y: clamp(margin, 0, maxY) }
+      return { x: left, y: bottom }
     case "bottom-right":
-      return { x: clamp(pageWidth - margin - textWidth, 0, maxX), y: clamp(margin, 0, maxY) }
+      return { x: right, y: bottom }
     case "center":
-      return { x: clamp((pageWidth - textWidth) / 2, 0, maxX), y: clamp((pageHeight - fontSize) / 2, 0, maxY) }
+      return {
+        x: clamp((pageWidth - blockWidth) / 2, 0, maxX),
+        y: clamp((pageHeight - blockHeight) / 2, 0, maxY),
+      }
   }
+}
+
+function lineAlignment(preset: PdfEditOverlayPositionPreset): "left" | "right" | "center" {
+  if (preset === "top-right" || preset === "bottom-right") return "right"
+  if (preset === "center") return "center"
+  return "left"
 }
 
 export async function overlayTextOnPdfBuffer(
@@ -222,6 +254,15 @@ export async function overlayTextOnPdfBuffer(
     throw new PdfEditOverlayError(
       "INVALID_OPTION",
       "Overlay text must not be empty.",
+      { field: "options.text" },
+    )
+  }
+
+  const lines = toOverlayLines(text)
+  if (text.length > MAX_OVERLAY_CHARS || lines.length > MAX_OVERLAY_LINES) {
+    throw new PdfEditOverlayError(
+      "INVALID_OPTION",
+      `Overlay text must be at most ${MAX_OVERLAY_CHARS} characters and ${MAX_OVERLAY_LINES} lines.`,
       { field: "options.text" },
     )
   }
@@ -282,6 +323,13 @@ export async function overlayTextOnPdfBuffer(
       { field: "options.pages" },
     )
   }
+  if (pages.kind === "range" && typeof pages.range !== "string") {
+    throw new PdfEditOverlayError(
+      "INVALID_OPTION",
+      "Pages range must be a string such as \"1-3,5\".",
+      { field: "options.pages.range" },
+    )
+  }
 
   let doc: PDFDocument
   try {
@@ -293,33 +341,73 @@ export async function overlayTextOnPdfBuffer(
   }
 
   const pageCount = doc.getPageCount()
+  const maxPages = getMaxPdfPages()
+  if (pageCount > maxPages) {
+    throw new PdfEditOverlayError(
+      "TOO_MANY_PAGES",
+      `PDF has ${pageCount} pages; max is ${maxPages}.`,
+      { field: "input" },
+    )
+  }
   const pageIndices =
     pages.kind === "all"
       ? resolvePageIndices({ kind: "all" }, pageCount)
       : resolvePageIndices({ kind: "range", range: pages.range }, pageCount)
 
+  const font = await doc.embedFont(StandardFonts.Helvetica)
+
+  // Helvetica (WinAnsi) covers Latin-1 plus a few typographic symbols.
+  // Report unsupported characters (e.g. CJK, emoji) instead of a generic failure.
+  const supported = new Set(font.getCharacterSet())
+  const unsupported = [
+    ...new Set(
+      [...lines.join("")].filter((char) => !supported.has(char.codePointAt(0) ?? -1)),
+    ),
+  ]
+  if (unsupported.length > 0) {
+    const sample = unsupported.slice(0, 5).join(" ")
+    throw new PdfEditOverlayError(
+      "UNSUPPORTED_CHARACTERS",
+      `Overlay text contains characters the PDF font cannot render: ${sample}. Only Latin characters are supported.`,
+      { field: "options.text", details: unsupported.join("") },
+    )
+  }
+
   try {
-    const font = await doc.embedFont(StandardFonts.Helvetica)
+    const lineHeight = fontSize * LINE_HEIGHT_FACTOR
+    const lineWidths = lines.map((line) => font.widthOfTextAtSize(line, fontSize))
+    const blockWidth = Math.max(...lineWidths)
+    const blockHeight = fontSize + (lines.length - 1) * lineHeight
+    const align = lineAlignment(position)
 
     for (const pageIndex of pageIndices) {
       const page = doc.getPage(pageIndex)
       const { width, height } = page.getSize()
-      const textWidth = font.widthOfTextAtSize(text, fontSize)
       const { x, y } = resolveOverlayPosition(
         position,
         width,
         height,
-        textWidth,
-        fontSize,
+        blockWidth,
+        blockHeight,
       )
 
-      page.drawText(text, {
-        x,
-        y,
-        size: fontSize,
-        font,
-        color: rgb(0, 0, 0),
-        opacity,
+      lines.forEach((line, lineIndex) => {
+        if (line.length === 0) return
+        const offset =
+          align === "right"
+            ? blockWidth - lineWidths[lineIndex]
+            : align === "center"
+              ? (blockWidth - lineWidths[lineIndex]) / 2
+              : 0
+        page.drawText(line, {
+          x: x + offset,
+          // First line sits at the top of the block.
+          y: y + blockHeight - fontSize - lineIndex * lineHeight,
+          size: fontSize,
+          font,
+          color: rgb(0, 0, 0),
+          opacity,
+        })
       })
     }
 

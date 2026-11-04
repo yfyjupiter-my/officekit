@@ -1,7 +1,9 @@
 import JSZip from "jszip"
 import { PDFDocument } from "pdf-lib"
 
-export type PdfSplitErrorCode = "INVALID_PDF" | "EMPTY_PDF"
+import { getMaxPdfPages } from "./limits"
+
+export type PdfSplitErrorCode = "INVALID_PDF" | "EMPTY_PDF" | "TOO_MANY_PAGES"
 
 export class PdfSplitError extends Error {
   readonly code: PdfSplitErrorCode
@@ -31,6 +33,14 @@ export async function splitPdfToZipBuffer(
   const pageCount = source.getPageCount()
   if (pageCount === 0) {
     throw new PdfSplitError("EMPTY_PDF", "PDF contains no pages.")
+  }
+
+  const maxPages = getMaxPdfPages()
+  if (pageCount > maxPages) {
+    throw new PdfSplitError(
+      "TOO_MANY_PAGES",
+      `PDF has ${pageCount} pages; max is ${maxPages}.`,
+    )
   }
 
   const zip = new JSZip()

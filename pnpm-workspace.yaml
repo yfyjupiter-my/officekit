@@ -5,3 +5,14 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 nodeLinker: hoisted
+
+overrides:
+  # next bundles sharp@^0.34 for image optimization; force the patched release (QA-03)
+  sharp: ^0.35.5
+  # Build/dev-toolchain advisories, patched within current majors (QA-11)
+  postcss: ^8.5.23
+  js-yaml: ^4.3.2
+  brace-expansion@1: ^1.1.21
+  brace-expansion@5: ^5.0.12
+  nanoid@3: ^3.3.18
+  source-map-js: ^1.2.2

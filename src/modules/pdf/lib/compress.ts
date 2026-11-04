@@ -3,6 +3,7 @@ import os from "node:os"
 import fs from "node:fs/promises"
 import { spawn } from "node:child_process"
 
+import { getEnvInt } from "@/lib/env"
 import { cleanupRequestDir, createRequestUploadDir, ensureDir } from "@/lib/upload"
 
 export type PdfCompressPreset =
@@ -12,7 +13,11 @@ export type PdfCompressPreset =
   | "printer"
   | "prepress"
 
-export type PdfCompressErrorCode = "GHOSTSCRIPT_NOT_FOUND" | "GHOSTSCRIPT_FAILED"
+export type PdfCompressErrorCode =
+  | "INVALID_PDF"
+  | "GHOSTSCRIPT_NOT_FOUND"
+  | "GHOSTSCRIPT_FAILED"
+  | "GHOSTSCRIPT_TIMEOUT"
 
 export class PdfCompressError extends Error {
   readonly code: PdfCompressErrorCode
@@ -29,6 +34,15 @@ export class PdfCompressError extends Error {
     this.exitCode = options?.exitCode
     this.stderr = options?.stderr
   }
+}
+
+const DEFAULT_GHOSTSCRIPT_TIMEOUT_MS = 60_000
+const MAX_STDERR_CHARS = 16 * 1024
+
+/** Wall-clock limit for one Ghostscript run; the process is killed past it. */
+function getGhostscriptTimeoutMs(): number {
+  const value = getEnvInt("GHOSTSCRIPT_TIMEOUT_MS", DEFAULT_GHOSTSCRIPT_TIMEOUT_MS)
+  return value > 0 ? value : DEFAULT_GHOSTSCRIPT_TIMEOUT_MS
 }
 
 function getPdfSettings(preset: PdfCompressPreset): string {
@@ -193,12 +207,14 @@ async function runGhostscript(
     process.platform === "win32"
       ? [...baseCommands, ...(await getWindowsInstalledGhostscriptCommands())]
       : baseCommands
+  const timeoutMs = getGhostscriptTimeoutMs()
   let lastNotFound = false
 
   for (const command of commands) {
     const result = await new Promise<
       | { ok: true }
       | { ok: false; reason: "NOT_FOUND" }
+      | { ok: false; reason: "TIMEOUT" }
       | { ok: false; reason: "FAILED"; exitCode: number | null; stderr: string }
     >((resolve) => {
       const child = spawn(command, [...args], {
@@ -206,13 +222,23 @@ async function runGhostscript(
         stdio: ["ignore", "ignore", "pipe"],
       })
 
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill("SIGKILL")
+      }, timeoutMs)
+      timer.unref()
+
       let stderr = ""
       child.stderr.setEncoding("utf8")
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk
+      child.stderr.on("data", (chunk: string) => {
+        if (stderr.length < MAX_STDERR_CHARS) {
+          stderr += chunk.slice(0, MAX_STDERR_CHARS - stderr.length)
+        }
       })
 
       child.on("error", (error) => {
+        clearTimeout(timer)
         const code =
           typeof (error as NodeJS.ErrnoException).code === "string"
             ? (error as NodeJS.ErrnoException).code
@@ -231,6 +257,11 @@ async function runGhostscript(
       })
 
       child.on("close", (exitCode) => {
+        clearTimeout(timer)
+        if (timedOut) {
+          resolve({ ok: false, reason: "TIMEOUT" })
+          return
+        }
         if (exitCode === 0) {
           resolve({ ok: true })
           return
@@ -245,6 +276,13 @@ async function runGhostscript(
     if (result.reason === "NOT_FOUND") {
       lastNotFound = true
       continue
+    }
+
+    if (result.reason === "TIMEOUT") {
+      throw new PdfCompressError(
+        "GHOSTSCRIPT_TIMEOUT",
+        `Compression timed out after ${Math.max(1, Math.ceil(timeoutMs / 1000))} seconds.`,
+      )
     }
 
     const stderrTrimmed = result.stderr.trim()
@@ -266,10 +304,26 @@ async function runGhostscript(
   }
 }
 
+/** PDF readers accept the `%PDF-` signature anywhere in the first 1 KB. */
+function hasPdfHeader(data: Uint8Array): boolean {
+  return Buffer.from(data.subarray(0, 1024)).includes("%PDF-")
+}
+
+export type PdfCompressResult = {
+  data: Buffer
+  /** False when Ghostscript's output was not smaller and the input was returned. */
+  compressed: boolean
+  originalSize: number
+}
+
 export async function compressPdfBuffer(
   pdfBuffer: Uint8Array,
   options?: { preset?: PdfCompressPreset; ghostscriptPath?: string },
-): Promise<Buffer> {
+): Promise<PdfCompressResult> {
+  if (!hasPdfHeader(pdfBuffer)) {
+    throw new PdfCompressError("INVALID_PDF", "Input is not a valid PDF.")
+  }
+
   const baseDir = path.join(os.tmpdir(), "pdf-compress")
   await ensureDir(baseDir)
 
@@ -298,7 +352,11 @@ export async function compressPdfBuffer(
     await runGhostscript(args, { ghostscriptPath: options?.ghostscriptPath })
 
     const output = await fs.readFile(outputPath)
-    return output
+    // Re-encoding already-optimised PDFs can grow them; never return a larger file.
+    if (output.length >= pdfBuffer.length) {
+      return { data: Buffer.from(pdfBuffer), compressed: false, originalSize: pdfBuffer.length }
+    }
+    return { data: output, compressed: true, originalSize: pdfBuffer.length }
   } finally {
     await cleanupRequestDir(dir)
   }

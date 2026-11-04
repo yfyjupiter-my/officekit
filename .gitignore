@@ -13,8 +13,12 @@
 # testing
 /coverage
 
+# local upload temp dir (UPLOAD_DIR default)
+/.tmp/
+
 # next.js
 /.next/
+/.next-officekit/
 /out/
 
 # production
