@@ -48,26 +48,37 @@ Status legend: `[ ]` open · `[x]` fixed
 
 ## High
 
-### [ ] QA-04 — Image convert accepts unlisted input formats (SVG, HEIF, TIFF, …)
+### [x] QA-04 — Image convert accepts unlisted input formats (SVG, HEIF, TIFF, …)
 - **Where:** `src/app/api/image/convert/route.ts`, `src/modules/image/lib/convert.ts`
 - **Problem:** UI/API advertise PNG/JPG/WebP only, but any format sharp can decode is accepted. Type check passes if `file.type` is empty or any `image/*`.
 - **Evidence:** an SVG upload (`image/svg+xml`) converted successfully → reaches librsvg (see QA-03).
 - **Fix:** after `metadata()`, allow only `format ∈ {png, jpeg, webp}`; consider explicit `limitInputPixels`.
+- **Resolution:** `convert.ts` reads the image header first and rejects any decoded format other than png/jpeg/webp with 400 `UNSUPPORTED_FORMAT` (this checks the real file contents, so renaming a file doesn't get around it). New `MAX_IMAGE_PIXELS` cap (default 40 MP ≈ 160 MB RGBA; sharp's default ≈268 MP could exceed the 512 MB container) → 400 `IMAGE_TOO_LARGE`, also enforced at decode via `limitInputPixels`.
+- **Verified:** SVG, GIF, SVG renamed to `.png` → `UNSUPPORTED_FORMAT`; TIFF → `INVALID_TYPE`; 50 MP PNG → `IMAGE_TOO_LARGE`; PNG→WebP, PNG→JPG, JPG→PNG still 200.
 
-### [ ] QA-05 — Ghostscript runs with no timeout
+### [x] QA-05 — Ghostscript runs with no timeout
 - **Where:** `src/modules/pdf/lib/compress.ts` (`runGhostscript`)
 - **Problem:** spawned `gs` has no timeout / kill; a crafted PDF can hang a request and hold CPU indefinitely.
 - **Fix:** add a timeout (e.g. 60 s) that kills the child and returns a clear error.
+- **Resolution:** `runGhostscript` kills `gs` with SIGKILL after `GHOSTSCRIPT_TIMEOUT_MS` (default 60000) → 422 `GHOSTSCRIPT_TIMEOUT`. Buffered stderr capped at 16 KB.
+- **Verified:** with `GHOSTSCRIPT_TIMEOUT_MS=1` → 422 in 15 ms, no orphan `gs` processes; normal compress still 200.
 
-### [ ] QA-06 — No rate limiting / abuse protection
+### [x] QA-06 — No rate limiting / abuse protection
 - **Where:** all `/api/*` routes
 - **Problem:** CPU-heavy endpoints (Ghostscript, sharp, pdf-lib) are public and unauthenticated; easy to exhaust `cpus: 1.0`.
 - **Fix:** add per-IP rate limiting (middleware or reverse proxy) and a concurrency cap for heavy jobs.
+- **Resolution:** new `src/lib/rate-limit.ts`, applied to all 6 POST routes:
+  - Per-client fixed window (`RATE_LIMIT_MAX`, default 30 per `RATE_LIMIT_WINDOW_MS` = 60 s) plus a global window (`RATE_LIMIT_GLOBAL_MAX`, default 300) → 429 `RATE_LIMITED` with `Retry-After`.
+  - Heavy routes (pdf ×4, image) take a job slot *after* the upload body is read: `MAX_CONCURRENT_JOBS` (default 2) running, `MAX_QUEUED_JOBS` (default 8) waiting, overflow → 503 `SERVER_BUSY`.
+- **Verified:** with limit 5, requests 6–7 from one client → 429 `Retry-After: 60` while another client gets 200. With 1 slot / 0 queue, 3 parallel splits → one 200 and two 503.
+- **Caveat:** the per-client key is the first `X-Forwarded-For` entry. Tested: Next.js fills that header from the socket address only when the client didn't send one, and passes a client-supplied value through unchanged, so without a reverse proxy that overwrites it, clients can fake it. The global limit and job cap still bound total load. The state is in-memory, per process, so it only works for single-instance deployments.
 
-### [ ] QA-07 — Unbounded page count in split / merge / edit
+### [x] QA-07 — Unbounded page count in split / merge / edit
 - **Where:** `src/modules/pdf/lib/{split,merge,edit}.ts`
 - **Problem:** a small PDF with tens of thousands of pages produces one in-memory PDF per page plus a ZIP — memory/CPU blow-up within the 25 MB upload limit.
 - **Fix:** enforce a max page count (env-configurable).
+- **Resolution:** `MAX_PDF_PAGES` (default 500, `src/modules/pdf/lib/limits.ts`) enforced in split, edit, and merge (summed across inputs) → 400 `TOO_MANY_PAGES`. Compress is bounded by the Ghostscript timeout instead, because loading every PDF with pdf-lib first could reject files Ghostscript handles fine.
+- **Verified:** split/edit 600 pages → 400; merge 300+300 → 400 (`inputIndex: 1`); split 300 and merge 300+2 → 200.
 
 ## Medium
 

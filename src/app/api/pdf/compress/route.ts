@@ -2,6 +2,7 @@ import fs from "node:fs/promises"
 
 import { NextResponse } from "next/server"
 
+import { acquireJobSlot, checkRateLimit } from "@/lib/rate-limit"
 import {
   cleanupRequestDir,
   getDefaultUploadLimits,
@@ -54,6 +55,9 @@ function parsePreset(value: FormDataEntryValue | null): PdfCompressPreset | unde
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return badRequest(
@@ -100,6 +104,9 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
+  const releaseJobSlot = await acquireJobSlot()
+  if (releaseJobSlot instanceof Response) return releaseJobSlot
+
   let requestDir: string | undefined
 
   try {
@@ -137,10 +144,18 @@ export async function POST(request: Request): Promise<Response> {
       })
     }
     if (error instanceof PdfCompressError) {
+      if (error.code === "GHOSTSCRIPT_TIMEOUT") {
+        // The input is too expensive to process, not a server fault.
+        return NextResponse.json(
+          { ok: false, error: { code: error.code, message: error.message } },
+          { status: 422 },
+        )
+      }
       return internalError(error.code, error.message)
     }
     return internalError()
   } finally {
+    releaseJobSlot()
     if (requestDir) {
       try {
         await cleanupRequestDir(requestDir)

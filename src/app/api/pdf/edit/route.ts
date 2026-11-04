@@ -2,6 +2,7 @@ import fs from "node:fs/promises"
 
 import { NextResponse } from "next/server"
 
+import { acquireJobSlot, checkRateLimit } from "@/lib/rate-limit"
 import {
   cleanupRequestDir,
   getDefaultUploadLimits,
@@ -117,6 +118,9 @@ function parseOptions(value: FormDataEntryValue | null): PdfEditOverlayOptions {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const rateLimited = checkRateLimit(request)
+  if (rateLimited) return rateLimited
+
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("multipart/form-data")) {
     return badRequest(
@@ -162,6 +166,9 @@ export async function POST(request: Request): Promise<Response> {
       field: "file",
     })
   }
+
+  const releaseJobSlot = await acquireJobSlot()
+  if (releaseJobSlot instanceof Response) return releaseJobSlot
 
   let requestDir: string | undefined
 
@@ -210,6 +217,7 @@ export async function POST(request: Request): Promise<Response> {
     }
     return internalError()
   } finally {
+    releaseJobSlot()
     if (requestDir) {
       try {
         await cleanupRequestDir(requestDir)

@@ -1,5 +1,7 @@
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib"
 
+import { getMaxPdfPages } from "./limits"
+
 export type PdfEditOverlayPositionPreset =
   | "top-left"
   | "top-right"
@@ -24,6 +26,7 @@ export type PdfEditOverlayErrorCode =
   | "EMPTY_PDF"
   | "INVALID_OPTION"
   | "INVALID_PAGE_RANGE"
+  | "TOO_MANY_PAGES"
   | "OVERLAY_FAILED"
 
 export type PdfEditOverlayErrorField =
@@ -293,6 +296,14 @@ export async function overlayTextOnPdfBuffer(
   }
 
   const pageCount = doc.getPageCount()
+  const maxPages = getMaxPdfPages()
+  if (pageCount > maxPages) {
+    throw new PdfEditOverlayError(
+      "TOO_MANY_PAGES",
+      `PDF has ${pageCount} pages; max is ${maxPages}.`,
+      { field: "input" },
+    )
+  }
   const pageIndices =
     pages.kind === "all"
       ? resolvePageIndices({ kind: "all" }, pageCount)
