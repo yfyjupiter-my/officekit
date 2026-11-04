@@ -11,7 +11,7 @@ QA run: 2026-11-04 · Branch: `main` (commit `4c9912e`)
 | Production build | ✅ Passes |
 | Page routes (8) | ✅ All 200; unknown route 404 |
 | Automated tests | ❌ None — no test files, no `test` script |
-| Dependency audit (`pnpm audit`) | ❌ 41 vulnerabilities — 3 critical, 25 high, 13 moderate → after QA-02/03: **24 — 0 critical, 18 high, 6 moderate** (all build-time tooling, see QA-11) |
+| Dependency audit (`pnpm audit`) | ❌ 41 vulnerabilities — 3 critical, 25 high, 13 moderate → after QA-02/03: 24 → after QA-11: **1 moderate** (`minimatch`, dev-only, accepted) |
 
 Status legend: `[ ]` open · `[x]` fixed
 
@@ -82,25 +82,41 @@ Status legend: `[ ]` open · `[x]` fixed
 
 ## Medium
 
-### [ ] QA-08 — Client errors returned as 500
+### [x] QA-08 — Client errors returned as 500
 - Malformed multipart body → empty **500** (`request.formData()` is outside `try` in every upload route). Expected 400.
 - PDF Edit with `pages: {"kind":"range"}` and no `range` → **500** `INTERNAL_ERROR` (`range` never type-checked; `.trim()` throws outside the try in `edit.ts`). Expected 400 `INVALID_OPTION`.
 - PDF Compress with an invalid PDF → **500** `GHOSTSCRIPT_FAILED`. Expected 400 `INVALID_PDF` (validate with pdf-lib first or map gs failure).
+- **Resolution:**
+  - Malformed multipart → 400 `INVALID_FORM_DATA` (done with QA-01).
+  - `edit.ts` checks that `pages.range` is a string → 400 `INVALID_OPTION` (`options.pages.range`).
+  - `compress.ts` checks for the `%PDF-` header in the first 1 KB → 400 `INVALID_PDF`. Ghostscript failures on files that pass that check → 422 "Could not process this PDF"; a missing Ghostscript install stays 500.
+- **Verified:** missing or numeric range → 400; non-PDF to compress → 400; malformed multipart → 400. A truncated file that has a `%PDF-` header is repaired by Ghostscript → 200.
 
-### [ ] QA-09 — PDF Edit fails on non-Latin text
+### [ ] QA-09 — PDF Edit fails on non-Latin text (partially resolved)
 - **Where:** `src/modules/pdf/lib/edit.ts`
 - **Problem:** uses `StandardFonts.Helvetica` (WinAnsi only). Text like `你好` → 400 `OVERLAY_FAILED` "Failed to apply text overlay." with no explanation. Multi-line text also mis-measures width.
 - **Fix:** embed a Unicode font via `@pdf-lib/fontkit`, or validate and return a clear "unsupported characters" error.
+- **Found while fixing:** *any* line break or tab made `widthOfTextAtSize` throw, so text with Enter pressed in the Edit page's multi-line text box always failed with `OVERLAY_FAILED`.
+- **Resolution:**
+  - Text is split into lines (CRLF/CR/LF, tabs → 4 spaces) and drawn as a block. Lines align left, right or centre according to the position, with line height 1.2 × font size, and the block is clamped to the page.
+  - Characters the font can't render → 400 `UNSUPPORTED_CHARACTERS`, naming the characters (e.g. "你 好").
+  - Text is limited to 1000 characters and 20 lines.
+- **Verified:** multi-line text with a tab at all 5 positions → 200 and checked visually (rendered with Ghostscript). Latin-1, `– “ ” €` → 200. CJK and emoji → clear 400. 20 lines → 200, 21 → 400.
+- **Remaining:** non-Latin text still can't be *rendered*. That needs a Unicode font file (e.g. Noto Sans / Noto Sans CJK subset) plus `@pdf-lib/fontkit`; choosing the font and bundling it (several MB) is still to decide.
 
-### [ ] QA-10 — Compress can return a larger file
+### [x] QA-10 — Compress can return a larger file
 - **Where:** `src/modules/pdf/lib/compress.ts`
 - **Evidence:** 598-byte PDF → 3,052 bytes after `screen` preset.
 - **Fix:** return the original bytes when output ≥ input (optionally signal via header).
+- **Resolution:** `compressPdfBuffer` returns `{ data, compressed, originalSize }` and returns the input when Ghostscript's output isn't smaller. The response adds `X-Compression-Applied`, `X-Original-Size` and `X-Output-Size` headers, and the Compress page toast says "already optimised, original file returned".
+- **Verified:** 598-byte PDF → returned byte-identical, `X-Compression-Applied: false` (was 3,052 bytes). Image-heavy 12.1 MB PDF → 820 KB, `true`.
 
-### [ ] QA-11 — Dev-toolchain vulnerabilities (build-time only)
+### [x] QA-11 — Dev-toolchain vulnerabilities (build-time only)
 - `postcss` <8.5.18 — arbitrary file read / path traversal via source maps (high)
 - `brace-expansion`, `minimatch`, `js-yaml`, `nanoid`, `source-map-js` — ReDoS/DoS (high/moderate), via eslint/tailwind tooling
 - **Fix:** `pnpm update` / overrides; re-run `pnpm audit`.
+- **Resolution:** `pnpm-workspace.yaml` overrides, each staying within its current major version: `postcss ^8.5.23` (also replaces `next`'s pinned 8.4.31), `js-yaml ^4.3.2`, `brace-expansion@1 ^1.1.21`, `brace-expansion@5 ^5.0.12`, `nanoid@3 ^3.3.18`, `source-map-js ^1.2.2`. Type-check, lint and build pass.
+- **Audit now:** 1 moderate. `minimatch@3.1.5` (used by eslint) is fixed only in 11.x, and 3.1.5 is the latest 3.x, so it's **accepted**: dev-only, and it only matches ESLint's own config patterns, never user input.
 
 ### [x] QA-12 — Env limits not validated (fixed with QA-01)
 - **Where:** `src/lib/env.ts`, `src/lib/upload.ts`

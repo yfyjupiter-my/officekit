@@ -14,6 +14,7 @@ export type PdfCompressPreset =
   | "prepress"
 
 export type PdfCompressErrorCode =
+  | "INVALID_PDF"
   | "GHOSTSCRIPT_NOT_FOUND"
   | "GHOSTSCRIPT_FAILED"
   | "GHOSTSCRIPT_TIMEOUT"
@@ -303,10 +304,26 @@ async function runGhostscript(
   }
 }
 
+/** PDF readers accept the `%PDF-` signature anywhere in the first 1 KB. */
+function hasPdfHeader(data: Uint8Array): boolean {
+  return Buffer.from(data.subarray(0, 1024)).includes("%PDF-")
+}
+
+export type PdfCompressResult = {
+  data: Buffer
+  /** False when Ghostscript's output was not smaller and the input was returned. */
+  compressed: boolean
+  originalSize: number
+}
+
 export async function compressPdfBuffer(
   pdfBuffer: Uint8Array,
   options?: { preset?: PdfCompressPreset; ghostscriptPath?: string },
-): Promise<Buffer> {
+): Promise<PdfCompressResult> {
+  if (!hasPdfHeader(pdfBuffer)) {
+    throw new PdfCompressError("INVALID_PDF", "Input is not a valid PDF.")
+  }
+
   const baseDir = path.join(os.tmpdir(), "pdf-compress")
   await ensureDir(baseDir)
 
@@ -335,7 +352,11 @@ export async function compressPdfBuffer(
     await runGhostscript(args, { ghostscriptPath: options?.ghostscriptPath })
 
     const output = await fs.readFile(outputPath)
-    return output
+    // Re-encoding already-optimised PDFs can grow them; never return a larger file.
+    if (output.length >= pdfBuffer.length) {
+      return { data: Buffer.from(pdfBuffer), compressed: false, originalSize: pdfBuffer.length }
+    }
+    return { data: output, compressed: true, originalSize: pdfBuffer.length }
   } finally {
     await cleanupRequestDir(dir)
   }

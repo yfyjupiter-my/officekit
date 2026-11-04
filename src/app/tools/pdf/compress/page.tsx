@@ -146,7 +146,14 @@ export default function PdfCompressPage() {
       } finally {
         URL.revokeObjectURL(url)
       }
-      push({ kind: "success", title: "Downloaded", description: filename })
+      const compressionApplied = response.headers.get("x-compression-applied") !== "false"
+      push({
+        kind: "success",
+        title: "Downloaded",
+        description: compressionApplied
+          ? filename
+          : `${filename} — already optimised, original file returned`,
+      })
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Compress failed.")
     } finally {

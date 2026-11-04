@@ -127,14 +127,17 @@ export async function POST(request: Request): Promise<Response> {
     const ghostscriptPath =
       ghostscriptPathRaw.trim().length > 0 ? ghostscriptPathRaw.trim() : undefined
 
-    const compressed = await compressPdfBuffer(data, { preset, ghostscriptPath })
-    const compressedBytes = new Uint8Array(compressed)
+    const result = await compressPdfBuffer(data, { preset, ghostscriptPath })
+    const compressedBytes = new Uint8Array(result.data)
 
     return new NextResponse(compressedBytes, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": 'attachment; filename="compressed.pdf"',
+        "X-Compression-Applied": result.compressed ? "true" : "false",
+        "X-Original-Size": String(result.originalSize),
+        "X-Output-Size": String(result.data.length),
       },
     })
   } catch (error) {
@@ -144,6 +147,16 @@ export async function POST(request: Request): Promise<Response> {
       })
     }
     if (error instanceof PdfCompressError) {
+      if (error.code === "INVALID_PDF") {
+        return badRequest(error.code, error.message)
+      }
+      if (error.code === "GHOSTSCRIPT_FAILED") {
+        // Ghostscript rejected this input (corrupt or unsupported PDF).
+        return NextResponse.json(
+          { ok: false, error: { code: error.code, message: "Could not process this PDF. It may be corrupt or unsupported." } },
+          { status: 422 },
+        )
+      }
       if (error.code === "GHOSTSCRIPT_TIMEOUT") {
         // The input is too expensive to process, not a server fault.
         return NextResponse.json(
