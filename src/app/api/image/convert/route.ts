@@ -8,6 +8,8 @@ import {
   persistUploadsToTemp,
   UploadError,
   validateUploadSizes,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { convertImagesToZipBuffer, ImageConvertError } from "@/modules/image/lib"
 import type {
@@ -146,7 +148,12 @@ export async function POST(request: Request): Promise<Response> {
     return badRequest("INVALID_CONTENT_TYPE", "Expected multipart/form-data upload.")
   }
 
-  const formData = await request.formData()
+  const bodyLimits = getDefaultUploadLimits()
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const entries = [...formData.getAll("files[]"), ...formData.getAll("files")] as FormDataEntryValue[]
 
   if (entries.length === 0) {

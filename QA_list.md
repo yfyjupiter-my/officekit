@@ -1,0 +1,130 @@
+# QA List — officekit
+
+QA run: 2026-11-04 · Branch: `main` (commit `4c9912e`)
+
+## Summary
+
+| Check | Result |
+|---|---|
+| Type-check (`tsc --noEmit`) | ✅ No errors |
+| Lint (`next lint`) | ✅ No warnings (`next lint` is deprecated) |
+| Production build | ✅ Passes |
+| Page routes (8) | ✅ All 200; unknown route 404 |
+| Automated tests | ❌ None — no test files, no `test` script |
+| Dependency audit (`pnpm audit`) | ❌ 41 vulnerabilities — 3 critical, 25 high, 13 moderate → after QA-02/03: **24 — 0 critical, 18 high, 6 moderate** (all build-time tooling, see QA-11) |
+
+Status legend: `[ ]` open · `[x]` fixed
+
+---
+
+## Critical
+
+### [x] QA-01 — Unbounded request body buffering (memory DoS)
+- **Where:** all upload routes — `src/app/api/pdf/{merge,split,compress,edit}/route.ts`, `src/app/api/image/convert/route.ts`; limits in `src/lib/upload.ts`
+- **Problem:** `request.formData()` buffers the entire body in memory before `MAX_FILE_SIZE` / `MAX_FILES` are checked. There is no overall request-size cap.
+- **Evidence:** a 400 MB upload was correctly rejected (`FILE_TOO_LARGE`), but server RSS peaked at ~1.4 GB first. `docker-compose.yml` sets `mem_limit: 512m`, so one request can OOM-kill the container.
+- **Fix:** reject on `Content-Length` > `MAX_FILES × MAX_FILE_SIZE` + overhead before parsing; ideally stream-parse multipart and abort past the limit.
+- **Resolution (fix/qa-critical):**
+  - `src/lib/upload.ts`: new `readFormDataWithLimit` / `readJsonWithLimit`. They reject a declared `Content-Length` over the cap with **413 `REQUEST_TOO_LARGE`** before reading the body, and count bytes as they stream, so chunked bodies are cut off at the cap too.
+  - Body cap = `min(maxFiles × MAX_FILE_SIZE, MAX_TOTAL_UPLOAD_SIZE)` + 1 MiB multipart overhead (≈26 MB for single-file routes, ≈101 MB for merge / image convert). QR JSON body capped at 64 KB.
+  - New `MAX_TOTAL_UPLOAD_SIZE` env (default 100 MB, added to `docker-compose.yml`) plus a `TOTAL_TOO_LARGE` check. Zero or negative `MAX_*` env values now fall back to the defaults (fixes QA-12).
+  - All 6 POST routes use the limited readers. Malformed multipart now returns 400 `INVALID_FORM_DATA` instead of an empty 500 (covers that part of QA-08).
+- **Verified:** 400 MB upload → 413 in 3 ms (Content-Length) / 71 ms (chunked), RSS 242–273 MB against a 274 MB baseline (was ~1.4 GB). 11 × 10 MB merge → 413. A 200 KB QR body → 413. Normal and near-limit uploads still processed.
+- **Follow-up:** a valid 4 × 20 MB merge still raised RSS to ~497 MB because pdf-lib processes whole files in memory. With `mem_limit: 512m`, lower `MAX_TOTAL_UPLOAD_SIZE` (e.g. 50 MB) or raise the memory limit.
+
+### [x] QA-02 — Next.js has critical/high CVEs
+- **Package:** `next@15.5.18` → patched in `>=15.5.28`
+- **Advisories:** Unauthenticated RCE in Image Optimization API (critical, ×2); RCE on Windows-hosted servers (critical); SSRF in Server Actions / rewrites (high); DoS in App Router Server Actions (high); SSG/ISR cache poisoning (moderate).
+- **Fix:** upgrade `next` and `eslint-config-next` to latest 15.5.x (≥15.5.28).
+- **Resolution:** `next` and `eslint-config-next` pinned to `15.5.29`. `pnpm audit` no longer reports `next`; critical count 3 → 0.
+
+### [x] QA-03 — sharp bundles vulnerable libvips / libheif / librsvg
+- **Package:** `sharp@0.34.5` → patched in `>=0.35.5`
+- **Advisories:** inherited libvips CVEs (CVE-2026-33327 et al.), libheif (GHSA-g89c-p67h-r497, GHSA-2jg2-4…), librsvg (CVE-2026-96889).
+- **Impact:** the image convert endpoint decodes untrusted, unauthenticated uploads with these libraries.
+- **Fix:** upgrade `sharp` to ≥0.35.5 and re-verify the Docker standalone copy of `node_modules/sharp` + `@img`.
+- **Resolution:** `sharp` → `^0.35.5`. `next` pulls its own `sharp@^0.34` for image optimization, so a `pnpm-workspace.yaml` override forces `sharp: ^0.35.5` everywhere (lockfile has no 0.34.5). sharp 0.35 removed the `failOnError` option, so `convert.ts` now uses the equivalent `failOn: "warning"`. PNG → JPG / WebP conversion re-verified.
+- **Not yet verified:** the Docker image build (it copies `node_modules/sharp` + `@img` into the standalone output).
+
+## High
+
+### [ ] QA-04 — Image convert accepts unlisted input formats (SVG, HEIF, TIFF, …)
+- **Where:** `src/app/api/image/convert/route.ts`, `src/modules/image/lib/convert.ts`
+- **Problem:** UI/API advertise PNG/JPG/WebP only, but any format sharp can decode is accepted. Type check passes if `file.type` is empty or any `image/*`.
+- **Evidence:** an SVG upload (`image/svg+xml`) converted successfully → reaches librsvg (see QA-03).
+- **Fix:** after `metadata()`, allow only `format ∈ {png, jpeg, webp}`; consider explicit `limitInputPixels`.
+
+### [ ] QA-05 — Ghostscript runs with no timeout
+- **Where:** `src/modules/pdf/lib/compress.ts` (`runGhostscript`)
+- **Problem:** spawned `gs` has no timeout / kill; a crafted PDF can hang a request and hold CPU indefinitely.
+- **Fix:** add a timeout (e.g. 60 s) that kills the child and returns a clear error.
+
+### [ ] QA-06 — No rate limiting / abuse protection
+- **Where:** all `/api/*` routes
+- **Problem:** CPU-heavy endpoints (Ghostscript, sharp, pdf-lib) are public and unauthenticated; easy to exhaust `cpus: 1.0`.
+- **Fix:** add per-IP rate limiting (middleware or reverse proxy) and a concurrency cap for heavy jobs.
+
+### [ ] QA-07 — Unbounded page count in split / merge / edit
+- **Where:** `src/modules/pdf/lib/{split,merge,edit}.ts`
+- **Problem:** a small PDF with tens of thousands of pages produces one in-memory PDF per page plus a ZIP — memory/CPU blow-up within the 25 MB upload limit.
+- **Fix:** enforce a max page count (env-configurable).
+
+## Medium
+
+### [ ] QA-08 — Client errors returned as 500
+- Malformed multipart body → empty **500** (`request.formData()` is outside `try` in every upload route). Expected 400.
+- PDF Edit with `pages: {"kind":"range"}` and no `range` → **500** `INTERNAL_ERROR` (`range` never type-checked; `.trim()` throws outside the try in `edit.ts`). Expected 400 `INVALID_OPTION`.
+- PDF Compress with an invalid PDF → **500** `GHOSTSCRIPT_FAILED`. Expected 400 `INVALID_PDF` (validate with pdf-lib first or map gs failure).
+
+### [ ] QA-09 — PDF Edit fails on non-Latin text
+- **Where:** `src/modules/pdf/lib/edit.ts`
+- **Problem:** uses `StandardFonts.Helvetica` (WinAnsi only). Text like `你好` → 400 `OVERLAY_FAILED` "Failed to apply text overlay." with no explanation. Multi-line text also mis-measures width.
+- **Fix:** embed a Unicode font via `@pdf-lib/fontkit`, or validate and return a clear "unsupported characters" error.
+
+### [ ] QA-10 — Compress can return a larger file
+- **Where:** `src/modules/pdf/lib/compress.ts`
+- **Evidence:** 598-byte PDF → 3,052 bytes after `screen` preset.
+- **Fix:** return the original bytes when output ≥ input (optionally signal via header).
+
+### [ ] QA-11 — Dev-toolchain vulnerabilities (build-time only)
+- `postcss` <8.5.18 — arbitrary file read / path traversal via source maps (high)
+- `brace-expansion`, `minimatch`, `js-yaml`, `nanoid`, `source-map-js` — ReDoS/DoS (high/moderate), via eslint/tailwind tooling
+- **Fix:** `pnpm update` / overrides; re-run `pnpm audit`.
+
+### [x] QA-12 — Env limits not validated (fixed with QA-01)
+- **Where:** `src/lib/env.ts`, `src/lib/upload.ts`
+- **Problem:** `MAX_FILE_SIZE` / `MAX_FILES` accept 0 or negative values, silently rejecting every upload.
+- **Fix:** fall back to defaults when value ≤ 0.
+
+## Low / Hygiene
+
+### [ ] QA-13 — Build output committed to git
+- `.next-officekit/` (197 tracked files, ~300 MB on disk incl. webpack cache) is in the repo; `.gitignore` only covers `.next`.
+- **Fix:** add `/.next-officekit/` to `.gitignore` and `git rm -r --cached .next-officekit`.
+
+### [ ] QA-14 — Two lockfiles
+- `package-lock.json` and `pnpm-lock.yaml` both present; project uses pnpm (`packageManager`, Dockerfile). Remove `package-lock.json`.
+
+### [ ] QA-15 — No automated tests
+- Add a `test` script and API/unit tests (merge, split, compress, edit, qrcode, image convert, error paths, limits).
+
+### [ ] QA-16 — README is create-next-app boilerplate
+- Document Ghostscript requirement, env vars (`MAX_FILES`, `MAX_FILE_SIZE`, `UPLOAD_DIR`, `GHOSTSCRIPT_PATH`), Docker usage, API endpoints.
+
+### [ ] QA-17 — `next lint` deprecated
+- Migrate to ESLint CLI (`npx @next/codemod@canary next-lint-to-eslint-cli .`).
+
+### [ ] QA-18 — Download URL revoked synchronously; duplicated client helpers
+- `URL.revokeObjectURL` immediately after `anchor.click()` in every tool page can cancel downloads in some browsers — defer with `setTimeout`.
+- `downloadBlob`, `parseAttachmentFilename`, `formatBytes`, and API-error parsing are copy-pasted across 7 pages — extract to `src/lib/`.
+
+---
+
+## Verified working
+
+- PDF merge / split / compress / edit with valid PDFs
+- QR text and Wi-Fi payloads (special characters escaped)
+- Image PNG → WebP conversion
+- File-size limit (25 MB) and file-count limit (10)
+- Validation of page ranges, compress preset, quality, QR width, invalid JSON, wrong content-type
+- Temp upload directories cleaned up after each request

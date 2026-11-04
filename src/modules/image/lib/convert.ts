@@ -132,7 +132,7 @@ async function convertSingleImage(
   }
 
   const sourceBuffer = Buffer.from(input.data)
-  const pipeline = sharp(sourceBuffer, { failOnError: true })
+  const pipeline = sharp(sourceBuffer, { failOn: "warning" })
 
   try {
     await pipeline.metadata()

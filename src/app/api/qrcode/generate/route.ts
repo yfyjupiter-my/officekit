@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server"
 
+import { readJsonWithLimit } from "@/lib/upload"
+
 import { QrCodeError, generateQrPngBuffer } from "@/modules/qrcode"
 import type {
   QrErrorCorrectionLevel,
@@ -157,12 +159,9 @@ export async function POST(request: Request): Promise<Response> {
     return badRequest("INVALID_CONTENT_TYPE", "Expected application/json request body.")
   }
 
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return badRequest("INVALID_JSON", "Invalid JSON body.")
-  }
+  const parsed = await readJsonWithLimit(request)
+  if (parsed instanceof Response) return parsed
+  const body = parsed.value
 
   if (!isRecord(body)) {
     return badRequest("INVALID_BODY", "Request body must be a JSON object.")

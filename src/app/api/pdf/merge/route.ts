@@ -4,8 +4,11 @@ import { NextResponse } from "next/server"
 
 import {
   cleanupRequestDir,
+  getDefaultUploadLimits,
   persistUploadsToTemp,
   UploadError,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { mergePdfBuffers, PdfMergeError } from "@/modules/pdf/lib"
 
@@ -42,7 +45,12 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const formData = await request.formData()
+  const bodyLimits = getDefaultUploadLimits()
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const entries = [
     ...formData.getAll("files[]"),
     ...formData.getAll("files"),

@@ -8,6 +8,8 @@ import {
   persistUploadsToTemp,
   UploadError,
   validateUploadSizes,
+  getMaxMultipartBodyBytes,
+  readFormDataWithLimit,
 } from "@/lib/upload"
 import { getEnvString } from "@/lib/env"
 import { compressPdfBuffer, PdfCompressError } from "@/modules/pdf/lib"
@@ -60,7 +62,12 @@ export async function POST(request: Request): Promise<Response> {
     )
   }
 
-  const formData = await request.formData()
+  const bodyLimits = { ...getDefaultUploadLimits(), maxFiles: 1 }
+  const formData = await readFormDataWithLimit(
+    request,
+    getMaxMultipartBodyBytes(bodyLimits),
+  )
+  if (formData instanceof Response) return formData
   const fileEntries = formData.getAll("file")
   const presetValue = formData.get("preset")
 

@@ -5,3 +5,7 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 nodeLinker: hoisted
+
+overrides:
+  # next bundles sharp@^0.34 for image optimization; force the patched release (QA-03)
+  sharp: ^0.35.5
