@@ -1,5 +1,7 @@
 .next
-.next-officekit/cache
+.next-officekit
+.tmp
+coverage
 node_modules
 npm-debug.log
 pnpm-debug.log

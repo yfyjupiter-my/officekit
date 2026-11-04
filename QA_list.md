@@ -7,10 +7,10 @@ QA run: 2026-11-04 · Branch: `main` (commit `4c9912e`)
 | Check | Result |
 |---|---|
 | Type-check (`tsc --noEmit`) | ✅ No errors |
-| Lint (`next lint`) | ✅ No warnings (`next lint` is deprecated) |
+| Lint | ✅ No warnings (now `eslint .`, QA-17) |
 | Production build | ✅ Passes |
 | Page routes (8) | ✅ All 200; unknown route 404 |
-| Automated tests | ❌ None — no test files, no `test` script |
+| Automated tests | ❌ None → ✅ 64 Vitest tests (`pnpm test`) |
 | Dependency audit (`pnpm audit`) | ❌ 41 vulnerabilities — 3 critical, 25 high, 13 moderate → after QA-02/03: 24 → after QA-11: **1 moderate** (`minimatch`, dev-only, accepted) |
 
 Status legend: `[ ]` open · `[x]` fixed
@@ -125,25 +125,36 @@ Status legend: `[ ]` open · `[x]` fixed
 
 ## Low / Hygiene
 
-### [ ] QA-13 — Build output committed to git
+### [x] QA-13 — Build output committed to git
 - `.next-officekit/` (197 tracked files, ~300 MB on disk incl. webpack cache) is in the repo; `.gitignore` only covers `.next`.
 - **Fix:** add `/.next-officekit/` to `.gitignore` and `git rm -r --cached .next-officekit`.
+- **Resolution:** done (197 files untracked; local build dir kept). Also ignored `/.tmp/` (default `UPLOAD_DIR`) and excluded `.next-officekit`, `.tmp`, `coverage` from the Docker build context.
 
-### [ ] QA-14 — Two lockfiles
+### [x] QA-14 — Two lockfiles
 - `package-lock.json` and `pnpm-lock.yaml` both present; project uses pnpm (`packageManager`, Dockerfile). Remove `package-lock.json`.
+- **Resolution:** `package-lock.json` removed.
 
-### [ ] QA-15 — No automated tests
+### [x] QA-15 — No automated tests
 - Add a `test` script and API/unit tests (merge, split, compress, edit, qrcode, image convert, error paths, limits).
+- **Resolution:** Vitest 4.1.12, `pnpm test` / `pnpm test:watch`, config `vitest.config.mts`. 64 tests in `tests/`:
+  - unit tests: upload limits and body readers, rate limiter and job slots, PDF merge/split/edit/compress, image convert, QR;
+  - API tests that call each route handler directly: 200 / 400 / 413 / 429 paths, temp-dir cleanup.
+  - Ghostscript tests are skipped automatically when `gs` isn't installed.
+- **Verified:** 64/64 pass. Sanity check: disabling the early `Content-Length` check makes exactly the 2 tests covering it fail.
 
-### [ ] QA-16 — README is create-next-app boilerplate
+### [x] QA-16 — README is create-next-app boilerplate
 - Document Ghostscript requirement, env vars (`MAX_FILES`, `MAX_FILE_SIZE`, `UPLOAD_DIR`, `GHOSTSCRIPT_PATH`), Docker usage, API endpoints.
+- **Resolution:** README rewritten: the tools, requirements, scripts, Docker, all 14 env vars with defaults, the memory and reverse-proxy caveats, an API reference with error/status codes, the Latin-only font limitation, and the project structure.
 
-### [ ] QA-17 — `next lint` deprecated
+### [x] QA-17 — `next lint` deprecated
 - Migrate to ESLint CLI (`npx @next/codemod@canary next-lint-to-eslint-cli .`).
+- **Resolution:** `lint` script is now `eslint .` (flat config unchanged; added `.next-officekit/**` and `coverage/**` to ignores). Verified it lints `src/` and `tests/` and still reports errors (a deliberate `any` was flagged).
 
-### [ ] QA-18 — Download URL revoked synchronously; duplicated client helpers
+### [x] QA-18 — Download URL revoked synchronously; duplicated client helpers
 - `URL.revokeObjectURL` immediately after `anchor.click()` in every tool page can cancel downloads in some browsers — defer with `setTimeout`.
 - `downloadBlob`, `parseAttachmentFilename`, `formatBytes`, and API-error parsing are copy-pasted across 7 pages — extract to `src/lib/`.
+- **Resolution:** new `src/lib/client-files.ts` (`formatBytes`, `isProbablyPdf`, `parseAttachmentFilename`, `downloadBlob`). All copies were checked to be identical before removal; 7 pages now import it (−308 lines). `downloadBlob` revokes the object URL after 30 s instead of immediately. The per-page API-error message formatting differs on purpose (field hints, input index), so it was left in place.
+- **Verified:** real browser (Playwright) downloads from Split, Compress and QR complete with valid files and no page errors; the Compress "already optimised" toast shows.
 
 ---
 

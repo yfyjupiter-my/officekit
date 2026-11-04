@@ -4,6 +4,7 @@ import { useId, useMemo, useState } from "react"
 import Link from "next/link"
 import { FileText } from "lucide-react"
 
+import { downloadBlob, formatBytes, isProbablyPdf, parseAttachmentFilename } from "@/lib/client-files"
 import { DropZone } from "@/components/dropzone"
 import { ErrorState } from "@/components/error-state"
 import { FileItem } from "@/components/file-item"
@@ -22,54 +23,6 @@ type ApiErrorShape = {
 type SelectedFile = {
   id: string
   file: File
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"
-  const units = ["B", "KB", "MB", "GB"]
-  const exponent = Math.min(
-    units.length - 1,
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-  )
-  const value = bytes / 1024 ** exponent
-  const digits = exponent === 0 ? 0 : exponent === 1 ? 1 : 2
-  return `${value.toFixed(digits)} ${units[exponent]}`
-}
-
-function isProbablyPdf(file: File): boolean {
-  const nameLower = file.name.toLowerCase()
-  if (nameLower.endsWith(".pdf")) return true
-  return file.type === "" || file.type === "application/pdf"
-}
-
-function parseAttachmentFilename(contentDisposition: string | null): string | null {
-  if (!contentDisposition) return null
-  const match =
-    /filename\*=(?:UTF-8'')?([^;]+)|filename="([^"]+)"|filename=([^;]+)/i.exec(
-      contentDisposition,
-    )
-  const raw = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim()
-  if (!raw) return null
-  const unquoted = raw.replace(/^"(.*)"$/, "$1")
-  try {
-    return decodeURIComponent(unquoted)
-  } catch {
-    return unquoted
-  }
-}
-
-async function downloadBlob(blob: Blob, filename: string): Promise<void> {
-  const url = URL.createObjectURL(blob)
-  try {
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = filename
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-  } finally {
-    URL.revokeObjectURL(url)
-  }
 }
 
 export default function PdfToolsPage() {
@@ -168,7 +121,7 @@ export default function PdfToolsPage() {
       const filename =
         parseAttachmentFilename(response.headers.get("content-disposition")) ??
         "merged.pdf"
-      await downloadBlob(blob, filename)
+      downloadBlob(blob, filename)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Merge failed.")
     } finally {
@@ -218,7 +171,7 @@ export default function PdfToolsPage() {
       const filename =
         parseAttachmentFilename(response.headers.get("content-disposition")) ??
         "split.zip"
-      await downloadBlob(blob, filename)
+      downloadBlob(blob, filename)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Split failed.")
     } finally {
